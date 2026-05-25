@@ -5,6 +5,20 @@ import modal
 
 app = modal.App("flux-image-gen")
 
+MODEL_NAME = "black-forest-labs/FLUX.1-schnell"
+
+
+def download_model():
+    import torch
+    from diffusers import FluxPipeline
+
+    FluxPipeline.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch.bfloat16,
+        token=os.environ["HF_TOKEN"],
+    )
+
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -16,6 +30,11 @@ image = (
         "protobuf==5.27.2",
         "fastapi[standard]",
     )
+    .run_function(
+        download_model,
+        secrets=[modal.Secret.from_name("image-gen-hf-token")],
+        timeout=900,
+    )
 )
 
 with image.imports():
@@ -25,17 +44,21 @@ with image.imports():
 
 @app.cls(
     image=image,
-    gpu="L4",
+    gpu="A100-40GB",
     timeout=600,
     scaledown_window=300,
-    secrets=[modal.Secret.from_name("image-gen-api-key")],
+    secrets=[
+        modal.Secret.from_name("image-gen-api-key"),
+        modal.Secret.from_name("image-gen-hf-token"),
+    ],
 )
 class FluxModel:
     @modal.enter()
     def load_model(self):
         self.pipe = FluxPipeline.from_pretrained(
-            "black-forest-labs/FLUX.1-schnell",
+            MODEL_NAME,
             torch_dtype=torch.bfloat16,
+            token=os.environ["HF_TOKEN"],
         ).to("cuda")
 
     @modal.method()
@@ -50,7 +73,11 @@ class FluxModel:
         return buf.getvalue()
 
 
-@app.function(image=image, secrets=[modal.Secret.from_name("image-gen-api-key")])
+@app.function(
+    image=image,
+    secrets=[modal.Secret.from_name("image-gen-api-key")],
+    timeout=600,
+)
 @modal.fastapi_endpoint(method="POST")
 def generate_image(prompt: str, api_key: str):
     from fastapi.responses import Response
